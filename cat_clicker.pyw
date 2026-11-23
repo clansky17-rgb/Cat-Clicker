@@ -74,20 +74,103 @@ def make_tone(freq_start, freq_end, duration, volume=0.25):
     return pygame.mixer.Sound(buffer=buf)
 
 
+def make_background_music():
+    sample_rate = 44100
+    beat = 0.5
+    loop_seconds = beat * 16
+    mix = array.array("f", [0.0]) * int(sample_rate * loop_seconds)
+    chords = [
+        (130.81, (261.63, 329.63, 392.00)),
+        (87.31, (261.63, 349.23, 440.00)),
+        (110.00, (261.63, 329.63, 440.00)),
+        (98.00, (246.94, 293.66, 392.00)),
+    ]
+    melody = (523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 783.99, 698.46,
+              523.25, 659.25, 880.00, 783.99, 698.46, 587.33, 523.25, 392.00)
+    events = []
+
+    for beat_index, frequency in enumerate(melody):
+        bar = beat_index // 4
+        root, chord = chords[bar]
+        start = beat_index * beat
+        events.append((start, beat * 0.82, frequency, 0.12, "pluck"))
+        events.append((start, beat * 0.72, chord[beat_index % 4 % len(chord)], 0.055, "pluck"))
+        if beat_index % 4 == 0:
+            events.append((start, beat * 3.7, root, 0.075, "pad"))
+
+    for bar in range(4):
+        # Soft, pitch-bending meows add a cat-like melody between the notes.
+        events.append((bar * beat * 4 + beat * 2.0, 1.0, 360 + bar * 18, 0.055, "meow"))
+
+    for start, duration, frequency, volume, voice in events:
+        first_sample = int(start * sample_rate)
+        sample_count = int(duration * sample_rate)
+        phase = 0.0
+        base_step = 2 * math.pi * frequency / sample_rate
+        for i in range(sample_count):
+            t = i / sample_rate
+            progress = t / duration
+            if voice == "meow":
+                pitch = 0.78 + 0.29 * min(progress / 0.22, 1.0)
+                if progress > 0.22:
+                    pitch -= 0.42 * (progress - 0.22) / 0.78
+                vibrato = 1.0 + 0.012 * math.sin(2 * math.pi * 5 * t)
+                wave = math.sin(phase) + 0.34 * math.sin(phase * 2.01) + 0.08 * math.sin(phase * 3.02)
+                phase += base_step * pitch * vibrato
+                envelope = min(1.0, t / 0.07) * min(1.0, (duration - t) / 0.18)
+            elif voice == "pad":
+                wave = math.sin(phase) + 0.18 * math.sin(phase * 2)
+                phase += base_step
+                envelope = min(1.0, t / 0.12) * min(1.0, (duration - t) / 0.18) * 0.75
+            else:
+                wave = math.sin(phase) + 0.28 * math.sin(phase * 2)
+                phase += base_step
+                envelope = math.exp(-3.2 * progress) * min(1.0, t / 0.012) * min(1.0, (duration - t) / 0.045)
+            mix[first_sample + i] += wave * envelope * volume
+
+    peak = max(abs(value) for value in mix) or 1.0
+    pcm = array.array("h", (int(max(-1.0, min(1.0, value * 0.72 / peak)) * 32767) for value in mix))
+    return pygame.mixer.Sound(buffer=pcm)
+
+
+music_volume = 0.45
+sfx_volume = 0.75
+
 try:
     click_sound = make_tone(420, 680, 0.08, 0.22)
     buy_sound = make_tone(520, 880, 0.16, 0.28)
+    background_music = make_background_music()
+    music_channel = pygame.mixer.Channel(0)
     has_audio = True
+    sound_enabled = True
+    music_enabled = True
+    music_channel.set_volume(music_volume)
+    music_channel.play(background_music, loops=-1)
 except pygame.error:
     has_audio = False
+    background_music = None
+    music_channel = None
+    music_enabled = False
 
-sound_enabled = True
+sound_enabled = has_audio
 
 
 def play_sfx(snd):
     if has_audio and sound_enabled:
+        snd.set_volume(sfx_volume)
         snd.play()
-def build_cat_head(fur_col, stripe_col, ear_in, eye_col=EYE, white_muzzle=False):
+
+
+def update_volume_slider(which, mouse_x, slider_rect):
+    global music_volume, sfx_volume
+    volume = max(0.0, min(1.0, (mouse_x - slider_rect.left) / slider_rect.width))
+    if which == "music":
+        music_volume = volume
+        if has_audio:
+            music_channel.set_volume(music_volume)
+    else:
+        sfx_volume = volume
+def build_cat_head(fur_col, stripe_col, ear_in, eye_col=EYE, white_muzzle=False, show_blush=True):
     surf = pygame.Surface((210, 150), pygame.SRCALPHA)
     pygame.draw.polygon(surf, fur_col, [(40, 55), (25, 5), (80, 35)])
     pygame.draw.polygon(surf, OUTLINE, [(40, 55), (25, 5), (80, 35)], 4)
@@ -105,8 +188,9 @@ def build_cat_head(fur_col, stripe_col, ear_in, eye_col=EYE, white_muzzle=False)
     for x in (70, 140):
         pygame.draw.ellipse(surf, eye_col, (x - 11, 68, 22, 26))
         pygame.draw.circle(surf, WHITE, (x - 4, 76), 4)
-    pygame.draw.ellipse(surf, BLUSH, (43, 92, 22, 13))
-    pygame.draw.ellipse(surf, BLUSH, (145, 92, 22, 13))
+    if show_blush:
+        pygame.draw.ellipse(surf, BLUSH, (43, 92, 22, 13))
+        pygame.draw.ellipse(surf, BLUSH, (145, 92, 22, 13))
     mouth_col = (190, 180, 175) if fur_col == (34, 34, 40) else OUTLINE
     pygame.draw.ellipse(surf, NOSE, (99, 88, 12, 8))
     pygame.draw.arc(surf, mouth_col, (87, 90, 18, 16), 3.14, 6.28, 3)
@@ -135,7 +219,7 @@ cat_classic = build_cat_head(ORANGE, DARK_ORANGE, INNER_EAR)
 cat_tl = build_cat_head((78, 82, 88), (45, 48, 52), INNER_EAR, white_muzzle=True)
 cat_tr = build_cat_head((168, 136, 104), (112, 85, 60), INNER_EAR)
 cat_bl = build_cat_head((155, 158, 164), (105, 108, 114), INNER_EAR)
-cat_br = build_cat_head((34, 34, 40), None, (85, 65, 75), eye_col=(245, 208, 70))
+cat_br = build_cat_head((34, 34, 40), None, (85, 65, 75), eye_col=(245, 208, 70), show_blush=False)
 
 cat_squad = pygame.Surface((210, 150), pygame.SRCALPHA)
 cat_squad.blit(cat_tl, (0, 0), (0, 0, 105, 82))
@@ -180,6 +264,7 @@ DEFAULT_SHOP = [
     {"name": "Biscuit", "desc": "+500 per sec (Unique)", "cost": 50000, "owned": 0, "max": 1, "type": "auto", "power": 500},
     {"name": "Void", "desc": "+2,500 per click (Unique)", "cost": 250000, "owned": 0, "max": 1, "type": "click", "power": 2500},
     {"name": "Bean", "desc": "+10,000 per sec (Unique)", "cost": 1000000, "owned": 0, "max": 1, "type": "auto", "power": 10000},
+    {"name": "KITTEN CHAOS!!", "desc": "+1,000,000 per click", "cost": 100000000, "owned": 0, "max": None, "type": "click", "power": 1000000},
 ]
 
 
@@ -455,8 +540,15 @@ def load_full_progress():
         per_click = int(data.get("per_click", 1))
         per_sec = int(data.get("per_sec", 0))
         saved_items = data.get("shop_items", [])
-        if len(saved_items) == len(shop_items):
-            shop_items = saved_items
+        saved_by_name = {
+            item.get("name"): item for item in saved_items
+            if isinstance(item, dict) and item.get("name")
+        }
+        for item in shop_items:
+            saved_item = saved_by_name.get(item["name"])
+            if saved_item:
+                item["owned"] = saved_item.get("owned", item["owned"])
+                item["cost"] = saved_item.get("cost", item["cost"])
         if read_skin_unlock():
             skins_unlocked = True
             current_skin_idx = int(data.get("skin_idx", 1)) % len(SKIN_NAMES)
@@ -521,6 +613,7 @@ status_msg = ""
 status_timer = 0.0
 sync_timer = 0.0
 mouse_held = False
+active_volume_slider = None
 
 font_big = pygame.font.SysFont("Arial", 44, bold=True)
 font_med = pygame.font.SysFont("Arial", 24, bold=True)
@@ -587,20 +680,24 @@ while True:
         card_rect = pygame.Rect(scr_w - shop_w + 20, cy, shop_w - 40, card_h)
         shop_rects.append(card_rect)
 
-    opt_w, opt_h = 460, 680
+    opt_w, opt_h = 460, 700
     opt_rect = pygame.Rect((scr_w - opt_w) // 2, (scr_h - opt_h) // 2, opt_w, opt_h)
     bw, bh = 380, 44
     bx = opt_rect.centerx - bw // 2
-    btn_resume = pygame.Rect(bx, opt_rect.y + 84, bw, bh)
-    btn_open_lobby = pygame.Rect(bx, opt_rect.y + 138, bw, bh)
-    btn_skin = pygame.Rect(bx, opt_rect.y + 192, bw, bh)
-    btn_sound = pygame.Rect(bx, opt_rect.y + 246, bw, bh)
-    btn_toggle_hs = pygame.Rect(bx, opt_rect.y + 300, bw, bh)
-    btn_reset_hs = pygame.Rect(bx, opt_rect.y + 354, bw, bh)
-    btn_save = pygame.Rect(bx, opt_rect.y + 408, bw, bh)
-    btn_load = pygame.Rect(bx, opt_rect.y + 462, bw, bh)
-    btn_fullscreen = pygame.Rect(bx, opt_rect.y + 516, bw, bh)
-    btn_exit = pygame.Rect(bx, opt_rect.y + 570, bw, bh)
+    btn_resume = pygame.Rect(bx, opt_rect.y + 70, bw, bh)
+    btn_open_lobby = pygame.Rect(bx, opt_rect.y + 118, bw, bh)
+    btn_skin = pygame.Rect(bx, opt_rect.y + 166, bw, bh)
+    btn_sound = pygame.Rect(bx, opt_rect.y + 214, bw, bh)
+    btn_toggle_hs = pygame.Rect(bx, opt_rect.y + 378, bw, bh)
+    btn_reset_hs = pygame.Rect(bx, opt_rect.y + 426, bw, bh)
+    btn_save = pygame.Rect(bx, opt_rect.y + 474, bw, bh)
+    btn_load = pygame.Rect(bx, opt_rect.y + 522, bw, bh)
+    btn_fullscreen = pygame.Rect(bx, opt_rect.y + 570, bw, bh)
+    btn_exit = pygame.Rect(bx, opt_rect.y + 618, bw, bh)
+    slider_w = 320
+    slider_x = opt_rect.centerx - slider_w // 2
+    music_slider_rect = pygame.Rect(slider_x, opt_rect.y + 290, slider_w, 12)
+    sfx_slider_rect = pygame.Rect(slider_x, opt_rect.y + 344, slider_w, 12)
     lob_w, lob_h = 540, 560
     lob_rect = pygame.Rect((scr_w - lob_w) // 2, (scr_h - lob_h) // 2, lob_w, lob_h)
     lbw, lbh = 440, 48
@@ -659,6 +756,12 @@ while True:
                     ui_screen = "options"
                 status_msg = ""
 
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            active_volume_slider = None
+        if event.type == pygame.MOUSEMOTION and active_volume_slider and ui_screen == "options":
+            slider_rect = music_slider_rect if active_volume_slider == "music" else sfx_slider_rect
+            update_volume_slider(active_volume_slider, event.pos[0], slider_rect)
+
         if event.type == pygame.MOUSEWHEEL and ui_screen == "game":
             mx_now, _ = pygame.mouse.get_pos()
             if mx_now >= scr_w - shop_w:
@@ -668,7 +771,13 @@ while True:
             mouse_held = True
             mx_c, my_c = event.pos
             if ui_screen == "options":
-                if btn_resume.collidepoint(event.pos):
+                if music_slider_rect.collidepoint(event.pos):
+                    active_volume_slider = "music"
+                    update_volume_slider("music", event.pos[0], music_slider_rect)
+                elif sfx_slider_rect.collidepoint(event.pos):
+                    active_volume_slider = "sfx"
+                    update_volume_slider("sfx", event.pos[0], sfx_slider_rect)
+                elif btn_resume.collidepoint(event.pos):
                     ui_screen = "game"
                 elif btn_open_lobby.collidepoint(event.pos):
                     ui_screen = "lobby"
@@ -683,7 +792,13 @@ while True:
                         status_timer = 2.5
                         play_sfx(click_sound)
                 elif btn_sound.collidepoint(event.pos):
-                    sound_enabled = not sound_enabled
+                    music_enabled = not music_enabled
+                    if has_audio:
+                        if music_enabled:
+                            music_channel.set_volume(music_volume)
+                            music_channel.play(background_music, loops=-1)
+                        else:
+                            music_channel.stop()
                     play_sfx(click_sound)
                 elif btn_toggle_hs.collidepoint(event.pos):
                     show_high_score = not show_high_score
@@ -963,7 +1078,7 @@ while True:
             (btn_resume, "Resume Game", CARD_AFFORD, OUTLINE),
             (btn_open_lobby, "Multiplayer Lobby", BLUE_BTN, WHITE),
             (btn_skin, skin_lbl, CARD_OWNED if all_four_unlocked() else CARD_LOCKED, GOLD_TEXT if all_four_unlocked() else OUTLINE),
-            (btn_sound, f"Sound Effects: {'ON' if sound_enabled else 'OFF'}", CARD_AFFORD, GREEN if sound_enabled else DARK_ORANGE),
+            (btn_sound, f"Music: {'ON' if music_enabled else 'OFF'}", CARD_AFFORD, GREEN if music_enabled else DARK_ORANGE),
             (btn_toggle_hs, f"Show High Score: {'ON' if show_high_score else 'OFF'}", CARD_AFFORD, GREEN if show_high_score else DARK_ORANGE),
             (btn_reset_hs, "Reset High Score", WARN_BTN, WHITE),
             (btn_save, "Save Solo Progress", CARD_AFFORD, OUTLINE),
@@ -976,6 +1091,20 @@ while True:
             pygame.draw.rect(screen, OUTLINE, rect, 3, border_radius=12)
             s = font_med.render(lbl, True, tx_c)
             screen.blit(s, s.get_rect(center=rect.center))
+
+        music_vol_lbl = font_small.render(f"Music volume: {round(music_volume * 100)}%", True, OUTLINE)
+        sfx_vol_lbl = font_small.render(f"Sound effects volume: {round(sfx_volume * 100)}%", True, OUTLINE)
+        screen.blit(music_vol_lbl, (slider_x, opt_rect.y + 264))
+        screen.blit(sfx_vol_lbl, (slider_x, opt_rect.y + 318))
+        for slider_rect, volume in ((music_slider_rect, music_volume), (sfx_slider_rect, sfx_volume)):
+            pygame.draw.rect(screen, CARD_LOCKED, slider_rect, border_radius=6)
+            fill_rect = slider_rect.copy()
+            fill_rect.width = int(slider_rect.width * volume)
+            if fill_rect.width > 0:
+                pygame.draw.rect(screen, GREEN, fill_rect, border_radius=6)
+            pygame.draw.rect(screen, OUTLINE, slider_rect, 2, border_radius=6)
+            knob_x = slider_rect.left + int(slider_rect.width * volume)
+            pygame.draw.circle(screen, DARK_ORANGE, (knob_x, slider_rect.centery), 9)
 
         if status_msg:
             ms = font_small.render(status_msg, True, GREEN)
