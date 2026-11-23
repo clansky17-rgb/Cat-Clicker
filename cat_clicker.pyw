@@ -264,7 +264,7 @@ DEFAULT_SHOP = [
     {"name": "Biscuit", "desc": "+500 per sec (Unique)", "cost": 50000, "owned": 0, "max": 1, "type": "auto", "power": 500},
     {"name": "Void", "desc": "+2,500 per click (Unique)", "cost": 250000, "owned": 0, "max": 1, "type": "click", "power": 2500},
     {"name": "Bean", "desc": "+10,000 per sec (Unique)", "cost": 1000000, "owned": 0, "max": 1, "type": "auto", "power": 10000},
-    {"name": "KITTEN CHAOS!!", "desc": "+1,000,000 per click", "cost": 100000000, "owned": 0, "max": None, "type": "click", "power": 1000000},
+    {"name": "KITTEN CHAOS!!", "desc": "+1,000,000 per click", "cost": 10000000, "owned": 0, "max": 1, "type": "click", "power": 1000000},
 ]
 
 
@@ -288,7 +288,13 @@ net_lock = threading.Lock()
 
 ui_screen = "game"
 battle_phase = "solo"
+ai_mode = False
+ai_click_accumulator = 0.0
+ai_buy_timer = 0.0
+AI_CLICKS_PER_SECOND = 10.0
+AI_SHOP_CHECK_INTERVAL = 2.0
 battle_duration = 30
+ai_match_duration = 30
 battle_timer = 0.0
 p1_final_score = 0
 p2_final_score = 0
@@ -321,10 +327,11 @@ def net_send(msg_dict):
 
 
 def close_network():
-    global net_role, net_conn, net_server, net_connected, battle_phase
+    global net_role, net_conn, net_server, net_connected, battle_phase, ai_mode
     net_connected = False
     net_role = "offline"
     battle_phase = "solo"
+    ai_mode = False
     for sock in (net_conn, net_server):
         if sock:
             try:
@@ -338,11 +345,31 @@ def close_network():
 def is_my_turn():
     if battle_phase == "solo":
         return True
-    if battle_phase == "p1_turn" and net_role == "host":
+    if battle_phase == "p1_turn" and (net_role == "host" or ai_mode):
         return True
     if battle_phase == "p2_turn" and net_role == "client":
         return True
     return False
+
+
+def start_ai_battle():
+    global ai_mode, ai_click_accumulator, ai_buy_timer, ai_match_duration, battle_duration, battle_phase, battle_timer, p1_final_score, p2_final_score, ui_screen, typing_mode, custom_time_input
+    if typing_mode == "custom_time":
+        if custom_time_input.isdigit() and int(custom_time_input) >= 5:
+            battle_duration = int(custom_time_input)
+        custom_time_input = ""
+        typing_mode = None
+    close_network()
+    ai_mode = True
+    ai_click_accumulator = 0.0
+    ai_buy_timer = 0.0
+    ai_match_duration = int(battle_duration)
+    p1_final_score = 0
+    p2_final_score = 0
+    battle_timer = float(ai_match_duration)
+    reset_run_stats()
+    battle_phase = "p1_turn"
+    ui_screen = "game"
 def net_receive_loop(conn):
     global clicks, per_click, per_sec, shop_items, partner_x, partner_y, squish
     global net_connected, battle_phase, battle_duration, battle_timer
@@ -619,6 +646,40 @@ font_big = pygame.font.SysFont("Arial", 44, bold=True)
 font_med = pygame.font.SysFont("Arial", 24, bold=True)
 font_small = pygame.font.SysFont("Arial", 20, bold=True)
 font_float = pygame.font.SysFont("Arial", 34, bold=True)
+
+
+def ai_buy_upgrade():
+    global clicks, per_click, per_sec
+    affordable = []
+    for item in shop_items:
+        if item["max"] is not None and item["owned"] >= item["max"]:
+            continue
+        if clicks < item["cost"]:
+            continue
+        gain_rate = item["power"] * AI_CLICKS_PER_SECOND if item["type"] == "click" else item["power"]
+        affordable.append((gain_rate / max(1, item["cost"]), item))
+
+    if not affordable:
+        return
+
+    item = max(affordable, key=lambda option: option[0])[1]
+    clicks -= item["cost"]
+    item["owned"] += 1
+    if item["max"] is None:
+        item["cost"] = int(item["cost"] * 1.45)
+    if item["type"] == "click":
+        per_click += item["power"]
+    else:
+        per_sec += item["power"]
+
+    floating_texts.append({
+        "text": f"BOT BOUGHT {item['name']}!",
+        "x": float((screen.get_width() - 350) // 2),
+        "y": float(screen.get_height() // 2),
+        "alpha": 255.0,
+    })
+
+
 while True:
     dt = clock.tick(60) / 1000.0
     scr_w, scr_h = screen.get_width(), screen.get_height()
@@ -631,7 +692,23 @@ while True:
             status_msg = ""
 
     with net_lock:
-        if ui_screen == "game" and is_my_turn():
+        if ui_screen == "game" and ai_mode and battle_phase == "ai_turn":
+            ai_click_accumulator += AI_CLICKS_PER_SECOND * dt
+            ai_clicks = int(ai_click_accumulator)
+            if ai_clicks:
+                ai_click_accumulator -= ai_clicks
+                clicks += ai_clicks * per_click
+                squish = 1.0
+            clicks += per_sec * dt
+            ai_buy_timer += dt
+            if ai_buy_timer >= AI_SHOP_CHECK_INTERVAL:
+                ai_buy_timer -= AI_SHOP_CHECK_INTERVAL
+                ai_buy_upgrade()
+            battle_timer = max(0.0, battle_timer - dt)
+            if battle_timer <= 0.0:
+                p2_final_score = int(clicks)
+                battle_phase = "results"
+        elif ui_screen == "game" and is_my_turn():
             clicks += per_sec * dt
             if int(clicks) > high_score:
                 high_score = int(clicks)
@@ -639,7 +716,14 @@ while True:
             if battle_phase in ("p1_turn", "p2_turn"):
                 battle_timer = max(0.0, battle_timer - dt)
                 if battle_timer <= 0.0:
-                    if battle_phase == "p1_turn" and net_role == "host":
+                    if battle_phase == "p1_turn" and ai_mode:
+                        p1_final_score = int(clicks)
+                        reset_run_stats()
+                        ai_click_accumulator = 0.0
+                        ai_buy_timer = 0.0
+                        battle_timer = float(ai_match_duration)
+                        battle_phase = "ai_turn"
+                    elif battle_phase == "p1_turn" and net_role == "host":
                         p1_final_score = int(clicks)
                         battle_timer = float(battle_duration)
                         reset_run_stats()
@@ -698,7 +782,7 @@ while True:
     slider_x = opt_rect.centerx - slider_w // 2
     music_slider_rect = pygame.Rect(slider_x, opt_rect.y + 290, slider_w, 12)
     sfx_slider_rect = pygame.Rect(slider_x, opt_rect.y + 344, slider_w, 12)
-    lob_w, lob_h = 540, 560
+    lob_w, lob_h = 540, 620
     lob_rect = pygame.Rect((scr_w - lob_w) // 2, (scr_h - lob_h) // 2, lob_w, lob_h)
     lbw, lbh = 440, 48
     lbx = lob_rect.centerx - lbw // 2
@@ -707,7 +791,8 @@ while True:
     btn_preset_time = pygame.Rect(lbx, lob_rect.y + 250, 212, lbh)
     btn_custom_time = pygame.Rect(lbx + 228, lob_rect.y + 250, 212, lbh)
     btn_start_battle = pygame.Rect(lbx, lob_rect.y + 320, lbw, 54)
-    btn_back_solo = pygame.Rect(lbx, lob_rect.y + 390, lbw, lbh)
+    btn_ai_battle = pygame.Rect(lbx, lob_rect.y + 390, lbw, lbh)
+    btn_back_solo = pygame.Rect(lbx, lob_rect.y + 450, lbw, lbh)
 
     res_w, res_h = 500, 400
     res_rect = pygame.Rect((scr_w - res_w) // 2, (scr_h - res_h) // 2, res_w, res_h)
@@ -741,6 +826,7 @@ while True:
                         net_send({"type": "duration", "sec": battle_duration})
                         status_msg = f"Custom time set to {battle_duration}s!"
                         status_timer = 2.5
+                    custom_time_input = ""
                 elif event.key == pygame.K_ESCAPE:
                     typing_mode = None
                 elif event.key == pygame.K_BACKSPACE:
@@ -864,6 +950,12 @@ while True:
                     status_msg = "Type seconds (min 5) & press ENTER"
                     status_timer = 15.0
                 elif btn_start_battle.collidepoint(event.pos) and net_role == "host" and net_connected:
+                    if typing_mode == "custom_time":
+                        if custom_time_input.isdigit() and int(custom_time_input) >= 5:
+                            battle_duration = int(custom_time_input)
+                            net_send({"type": "duration", "sec": battle_duration})
+                        custom_time_input = ""
+                        typing_mode = None
                     with net_lock:
                         p1_final_score = 0
                         p2_final_score = 0
@@ -872,6 +964,9 @@ while True:
                         battle_phase = "p1_turn"
                         ui_screen = "game"
                     net_send({"type": "start_p1", "sec": battle_duration})
+                    play_sfx(buy_sound)
+                elif btn_ai_battle.collidepoint(event.pos):
+                    start_ai_battle()
                     play_sfx(buy_sound)
                 elif btn_back_solo.collidepoint(event.pos):
                     typing_mode = None
@@ -883,16 +978,24 @@ while True:
                         ui_screen = "game"
             elif ui_screen == "game":
                 if battle_phase == "results":
-                    if btn_rematch.collidepoint(event.pos) and net_role == "host" and net_connected:
+                    if btn_rematch.collidepoint(event.pos) and (ai_mode or (net_role == "host" and net_connected)):
                         with net_lock:
                             p1_final_score = 0
                             p2_final_score = 0
-                            battle_timer = float(battle_duration)
+                            ai_click_accumulator = 0.0
+                            ai_buy_timer = 0.0
+                            battle_timer = float(ai_match_duration if ai_mode else battle_duration)
                             reset_run_stats()
                             battle_phase = "p1_turn"
-                        net_send({"type": "start_p1", "sec": battle_duration})
-                    elif btn_res_lobby.collidepoint(event.pos):
                         if net_connected:
+                            net_send({"type": "start_p1", "sec": battle_duration})
+                    elif btn_res_lobby.collidepoint(event.pos):
+                        if ai_mode:
+                            ai_mode = False
+                            battle_phase = "lobby"
+                            ui_screen = "lobby"
+                            reset_run_stats()
+                        elif net_connected:
                             battle_phase = "lobby"
                             ui_screen = "lobby"
                             net_send({"type": "back_lobby"})
@@ -970,7 +1073,8 @@ while True:
         ft_surf.set_alpha(int(ft["alpha"]))
         screen.blit(ft_surf, ft_surf.get_rect(center=(int(ft["x"]), int(ft["y"]))))
 
-    score_surf = font_big.render(f"Cats: {int(clicks):,}", True, OUTLINE)
+    score_name = "Kitty Bot" if ai_mode and battle_phase == "ai_turn" else "Cats"
+    score_surf = font_big.render(f"{score_name}: {int(clicks):,}", True, OUTLINE)
     screen.blit(score_surf, (30, 25))
 
     if show_high_score and battle_phase == "solo":
@@ -983,13 +1087,20 @@ while True:
     rate_surf = font_small.render(f"+{per_click:,}/click  |  +{per_sec:,}/sec", True, GREEN)
     screen.blit(rate_surf, (30, rate_y))
 
-    if battle_phase in ("p1_turn", "p2_turn"):
+    if battle_phase in ("p1_turn", "p2_turn", "ai_turn"):
         t_surf = font_big.render(f"Time: {battle_timer:0.1f}s", True, RED_BTN if battle_timer <= 5 else BLUE_BTN)
         screen.blit(t_surf, t_surf.get_rect(center=(play_center_x, 42)))
 
         if battle_phase == "p1_turn":
-            turn_txt = "YOUR TURN! Set the score to beat!" if net_role == "host" else "WATCHING PLAYER 1 SET THE GOAL..."
-            sub_txt = ""
+            if ai_mode:
+                turn_txt = "YOUR TURN! Play against Kitty Bot!"
+                sub_txt = "Kitty Bot will take a full turn next."
+            else:
+                turn_txt = "YOUR TURN! Set the score to beat!" if net_role == "host" else "WATCHING PLAYER 1 SET THE GOAL..."
+                sub_txt = ""
+        elif battle_phase == "ai_turn":
+            turn_txt = "KITTY BOT IS CLICKING!"
+            sub_txt = f"Your score to beat: {p1_final_score:,} Cats"
         else:
             turn_txt = "YOUR TURN! Beat Player 1's Score!" if net_role == "client" else "WATCHING PLAYER 2..."
             sub_txt = f"Score to Beat: {p1_final_score:,} Cats"
@@ -1009,7 +1120,8 @@ while True:
         if card_rect.bottom < 90 or card_rect.top > scr_h:
             continue
         maxed_out = item["max"] is not None and item["owned"] >= item["max"]
-        can_afford = clicks >= item["cost"] and is_my_turn()
+        ai_shopping = ai_mode and battle_phase == "ai_turn"
+        can_afford = clicks >= item["cost"] and (is_my_turn() or ai_shopping)
         if maxed_out:
             card_color, title_text, cost_text, cost_color = CARD_OWNED, f"{item['name']} [1/1]", "OWNED", GOLD_TEXT
         else:
@@ -1026,7 +1138,10 @@ while True:
 
     pygame.draw.rect(screen, SHOP_BG, (scr_w - shop_w, 0, shop_w, 92))
     pygame.draw.line(screen, OUTLINE, (scr_w - shop_w, 0), (scr_w - shop_w, scr_h), 4)
-    shop_title = font_big.render("SHOP" if is_my_turn() else "SHOP (LOCKED)", True, OUTLINE)
+    if ai_mode and battle_phase == "ai_turn":
+        shop_title = font_med.render("KITTY BOT'S SHOP", True, OUTLINE)
+    else:
+        shop_title = font_big.render("SHOP" if is_my_turn() else "SHOP (LOCKED)", True, OUTLINE)
     screen.blit(shop_title, shop_title.get_rect(center=(scr_w - shop_w // 2, 48)))
 
     if net_connected:
@@ -1038,7 +1153,14 @@ while True:
         pygame.draw.rect(screen, BG, res_rect, border_radius=20)
         pygame.draw.rect(screen, OUTLINE, res_rect, 4, border_radius=20)
 
-        if p2_final_score > p1_final_score:
+        if ai_mode:
+            if p2_final_score > p1_final_score:
+                win_txt = "KITTY BOT WINS!"
+            elif p1_final_score > p2_final_score:
+                win_txt = "YOU BEAT KITTY BOT!"
+            else:
+                win_txt = "TIE WITH KITTY BOT!"
+        elif p2_final_score > p1_final_score:
             win_txt = "PLAYER 2 WINS!"
         elif p1_final_score > p2_final_score:
             win_txt = "PLAYER 1 (HOST) WINS!"
@@ -1047,15 +1169,18 @@ while True:
 
         w_s = font_big.render(win_txt, True, GOLD_TEXT)
         screen.blit(w_s, w_s.get_rect(center=(res_rect.centerx, res_rect.y + 55)))
-        p1_s = font_med.render(f"Player 1 Score: {p1_final_score:,} Cats", True, OUTLINE)
-        p2_s = font_med.render(f"Player 2 Score: {p2_final_score:,} Cats", True, BLUE_BTN)
+        p1_name = "You" if ai_mode else "Player 1"
+        p2_name = "Kitty Bot" if ai_mode else "Player 2"
+        p1_s = font_med.render(f"{p1_name}: {p1_final_score:,} Cats", True, OUTLINE)
+        p2_s = font_med.render(f"{p2_name}: {p2_final_score:,} Cats", True, BLUE_BTN)
         screen.blit(p1_s, p1_s.get_rect(center=(res_rect.centerx, res_rect.y + 125)))
         screen.blit(p2_s, p2_s.get_rect(center=(res_rect.centerx, res_rect.y + 170)))
 
-        if net_role == "host":
+        if ai_mode or net_role == "host":
             pygame.draw.rect(screen, GREEN, btn_rematch, border_radius=12)
             pygame.draw.rect(screen, OUTLINE, btn_rematch, 3, border_radius=12)
-            rm_l = font_med.render("Play Again (Same Time)", True, WHITE)
+            rm_label = "Play Again vs AI" if ai_mode else "Play Again (Same Time)"
+            rm_l = font_med.render(rm_label, True, WHITE)
             screen.blit(rm_l, rm_l.get_rect(center=btn_rematch.center))
 
         pygame.draw.rect(screen, CARD_AFFORD, btn_res_lobby, border_radius=12)
@@ -1117,7 +1242,7 @@ while True:
         pygame.draw.rect(screen, BG, lob_rect, border_radius=20)
         pygame.draw.rect(screen, OUTLINE, lob_rect, 4, border_radius=20)
 
-        t_s = font_big.render("MULTIPLAYER LOBBY", True, OUTLINE)
+        t_s = font_big.render("BATTLE MODE", True, OUTLINE)
         screen.blit(t_s, t_s.get_rect(center=(lob_rect.centerx, lob_rect.y + 44)))
 
         ip_info = f"Your Local IP: {get_local_ip()}  |  Status: {'Connected!' if net_connected else net_role.upper()}"
@@ -1147,6 +1272,11 @@ while True:
         st_txt = "START BATTLE!" if can_start else ("Waiting for Host to Start..." if net_role == "client" else "Waiting for Player 2 to Join...")
         st_s = font_med.render(st_txt, True, WHITE if can_start else (130, 120, 110))
         screen.blit(st_s, st_s.get_rect(center=btn_start_battle.center))
+
+        pygame.draw.rect(screen, GREEN, btn_ai_battle, border_radius=12)
+        pygame.draw.rect(screen, OUTLINE, btn_ai_battle, 3, border_radius=12)
+        ai_s = font_med.render("Play vs AI (Kitty Bot)", True, WHITE)
+        screen.blit(ai_s, ai_s.get_rect(center=btn_ai_battle.center))
 
         pygame.draw.rect(screen, CARD_AFFORD, btn_back_solo, border_radius=12)
         pygame.draw.rect(screen, OUTLINE, btn_back_solo, 3, border_radius=12)
